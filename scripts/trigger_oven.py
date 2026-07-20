@@ -32,6 +32,11 @@ write, cross-checked against panel-set delay-starts):
   the low-level GeWebsocketClient.async_set_erd_value(), bypassing the
   OvenCookSetting/erd_encode_timespan path entirely for this one field.
 
+Before writing the delay-start payload, this script reads back the oven's
+current cook-mode ERD and aborts without writing if it isn't NO_MODE (off) —
+so a preheat/cook someone else already set on the panel or app is never
+clobbered.
+
 Auth: SmartHQ accounts with MFA enabled can't complete a login unattended,
 so this script never does a fresh username/password login. Instead it
 authenticates with a long-lived refresh token obtained once, interactively,
@@ -75,7 +80,7 @@ from zoneinfo import ZoneInfo
 
 import aiohttp
 from gehomesdk import ErdCode, GeWebsocketClient
-from gehomesdk.erd.values.oven import ErdOvenState, OvenCookMode
+from gehomesdk.erd.values.oven import ErdOvenCookMode, ErdOvenState, OvenCookMode
 from gehomesdk.erd.values.oven.oven_cook_mode_mapping import OVEN_COOK_MODE_MAP
 
 PACIFIC = ZoneInfo("America/Los_Angeles")
@@ -136,6 +141,23 @@ def build_delayed_cook_mode_hex(temperature: int, start_hour: int, start_minute:
     )
 
 
+def get_current_oven_state(appliance, cook_mode_erd: "ErdCode") -> ErdOvenState:
+    """Read the appliance's currently-cached cook-mode ERD and decode just the
+    leading cook-mode byte into an ErdOvenState, so callers can check whether
+    the oven is off (NO_MODE) before writing a new delay-start setting.
+
+    Uses get_raw_erd_value() rather than the higher-level OvenCookSetting
+    decode path so this doesn't depend on the delay_time field decoding
+    cleanly — see the module docstring on why delay_time bytes here don't fit
+    gehomesdk's OvenCookSetting/erd_encode_timespan shape.
+    """
+    raw = appliance.get_raw_erd_value(cook_mode_erd)
+    if not raw:
+        raise RuntimeError(f"No cached value for {cook_mode_erd.name} yet — can't confirm oven is off.")
+    cook_mode_code = int(raw[0:2], 16)
+    return OVEN_COOK_MODE_MAP[ErdOvenCookMode(cook_mode_code)].oven_state
+
+
 async def start_oven() -> None:
     username = os.environ.get("SMARTHQ_USERNAME")
     refresh_token = os.environ.get("SMARTHQ_REFRESH_TOKEN")
@@ -179,6 +201,15 @@ async def start_oven() -> None:
             # oven's own panel) — likely a race while the appliance's
             # connection/state is still settling. Give it a moment.
             await asyncio.sleep(5)
+
+            current_state = get_current_oven_state(appliance, cook_mode_erd)
+            print(f"Current {cook_mode_erd.name} state: {current_state.name}")
+            if current_state != ErdOvenState.NO_MODE:
+                raise RuntimeError(
+                    f"Oven is not off (current state: {current_state.name}) — "
+                    "someone else may have set a preheat/cook already; refusing to "
+                    "override it."
+                )
 
             print(f"Found appliance {mac_addr}; setting {cook_mode_erd.name} -> {raw_hex}")
             await client.async_set_erd_value(appliance, cook_mode_erd, raw_hex)

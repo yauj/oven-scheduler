@@ -33,12 +33,12 @@ requirements.txt              gehomesdk + aiohttp
 ## Quick status
 
 - [x] Phase 0: Safety/feasibility check done (`docs/SAFETY_NOTES.md`)
-- [ ] Phase 1: One-time auth setup — refresh token + oven MAC address obtained
-- [ ] Phase 2: Manual test of the actual start command (`FORCE=1 python scripts/trigger_oven.py`)
-- [ ] Phase 3: `SMARTHQ_USERNAME` / `SMARTHQ_REFRESH_TOKEN` / `OVEN_MAC` GitHub secrets set, workflow enabled
-- [ ] Phase 4: Failure notifications configured (`NTFY_TOPIC` secret, optional)
-- [ ] Phase 5: Tested via manual `workflow_dispatch` (with and without `force`)
-- [ ] Phase 6: Decided on keep-alive vs. manual repo check-ins
+- [x] Phase 1: One-time auth setup — refresh token + oven MAC address obtained
+- [x] Phase 2: Manual test of the actual start command (`FORCE=1 python scripts/trigger_oven.py`)
+- [x] Phase 3: `SMARTHQ_USERNAME` / `SMARTHQ_REFRESH_TOKEN` / `OVEN_MAC` GitHub secrets set, workflow enabled and confirmed via `workflow_dispatch`
+- [x] Phase 4: Skipped — relying on GitHub's default failure-notification emails instead of ntfy.sh
+- [ ] Phase 5: Waiting on the first unattended Mon–Thu run to confirm the oven is at temperature by 6:00 AM
+- [x] Phase 6: Keep-alive workflow (`keep-alive.yml`) enabled
 
 ## Local testing
 
