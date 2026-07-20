@@ -40,7 +40,11 @@ write, cross-checked against panel-set delay-starts):
 Before writing the delay-start payload, this script reads back the oven's
 current cook-mode ERD and aborts without writing if it isn't NO_MODE (off) —
 so a preheat/cook someone else already set on the panel or app is never
-clobbered.
+clobbered. That specific failure (oven in use) is not retried, since a
+fresh connection won't change it. Any other failure (auth, connection
+timeout, appliance not appearing, write not verifying) is retried up to
+RUN_RETRIES times with a RUN_RETRY_COOLDOWN_SECONDS pause between full
+attempts, each with its own fresh connection.
 
 Auth: SmartHQ accounts with MFA enabled can't complete a login unattended,
 so this script never does a fresh username/password login. Instead it
@@ -67,6 +71,7 @@ Env vars optional:
 import asyncio
 import os
 import sys
+import time
 
 import aiohttp
 from gehomesdk import ErdCode, GeWebsocketClient
@@ -76,9 +81,16 @@ from gehomesdk.erd.values.oven.oven_cook_mode_mapping import OVEN_COOK_MODE_MAP
 CONNECT_TIMEOUT_SECONDS = 180
 WRITE_RETRIES = 5
 WRITE_VERIFY_DELAY_SECONDS = 10
+RUN_RETRIES = 3
+RUN_RETRY_COOLDOWN_SECONDS = 30
 
 # CONV_MUTLI_BAKE + delayed=True encodes to ErdOvenCookMode.CONVMULTIBAKE_DELAYSTART.
 DELAYED_COOK_MODE = OvenCookMode(oven_state=ErdOvenState.CONV_MUTLI_BAKE, delayed=True)
+
+
+class OvenInUseError(RuntimeError):
+    """Raised when the oven already has a cook mode set (not ours) — retrying
+    a fresh connection won't change that, so callers should not retry this."""
 
 
 def get_cook_mode_erd_code() -> "ErdCode":
@@ -157,7 +169,7 @@ async def start_oven() -> None:
     client = GeWebsocketClient(username, "", region, loop, refresh_token=refresh_token)
 
     done = asyncio.Event()
-    result: dict = {"ok": False, "error": None}
+    result: dict = {"ok": False, "exc": None}
 
     async def on_connected(*_args):
         try:
@@ -181,7 +193,7 @@ async def start_oven() -> None:
             current_state = get_current_oven_state(appliance, cook_mode_erd)
             print(f"Current {cook_mode_erd.name} state: {current_state.name}")
             if current_state != ErdOvenState.NO_MODE:
-                raise RuntimeError(
+                raise OvenInUseError(
                     f"Oven is not off (current state: {current_state.name}) — "
                     "someone else may have set a preheat/cook already; refusing to "
                     "override it."
@@ -209,9 +221,9 @@ async def start_oven() -> None:
                               f"expected {DELAYED_COOK_MODE.oven_state.name} — write did not stick.")
                 print(f"{last_error} Retrying." if attempt < WRITE_RETRIES else last_error)
             else:
-                result["error"] = last_error
+                result["exc"] = RuntimeError(last_error)
         except Exception as e:  # noqa: BLE001 - surface any failure to caller
-            result["error"] = str(e)
+            result["exc"] = e
         finally:
             done.set()
 
@@ -222,7 +234,8 @@ async def start_oven() -> None:
         try:
             await asyncio.wait_for(done.wait(), timeout=CONNECT_TIMEOUT_SECONDS)
         except asyncio.TimeoutError:
-            result["error"] = f"Timed out after {CONNECT_TIMEOUT_SECONDS}s waiting to connect/send command."
+            result["exc"] = RuntimeError(
+                f"Timed out after {CONNECT_TIMEOUT_SECONDS}s waiting to connect/send command.")
         finally:
             await client.disconnect()
             run_task.cancel()
@@ -232,14 +245,29 @@ async def start_oven() -> None:
                 pass
 
     if not result["ok"]:
-        print(f"ERROR: {result['error']}", file=sys.stderr)
-        sys.exit(1)
+        raise result["exc"]
 
 
 def main() -> None:
-    print("Connecting to SmartHQ to start the oven.")
-    asyncio.run(start_oven())
-    print("Done.")
+    for attempt in range(1, RUN_RETRIES + 1):
+        print(f"Run attempt {attempt}/{RUN_RETRIES}: connecting to SmartHQ to start the oven.")
+        try:
+            asyncio.run(start_oven())
+            print("Done.")
+            return
+        except OvenInUseError as e:
+            # Retrying a fresh connection won't change whether the oven is
+            # already in use — fail fast instead of burning the cooldown
+            # budget on retries that can't succeed.
+            print(f"ERROR: {e}", file=sys.stderr)
+            sys.exit(1)
+        except Exception as e:  # noqa: BLE001 - retry any other failure
+            print(f"Attempt {attempt}/{RUN_RETRIES} failed: {e}", file=sys.stderr)
+            if attempt == RUN_RETRIES:
+                print(f"ERROR: all {RUN_RETRIES} attempts failed.", file=sys.stderr)
+                sys.exit(1)
+            print(f"Cooling down {RUN_RETRY_COOLDOWN_SECONDS}s before retrying.")
+            time.sleep(RUN_RETRY_COOLDOWN_SECONDS)
 
 
 if __name__ == "__main__":
