@@ -1,0 +1,31 @@
+name: Keep-alive commit
+
+# GitHub disables scheduled workflows automatically after 60 days with no
+# repository activity. This runs monthly and makes a trivial commit so the
+# oven-trigger schedule never silently goes stale. Safe to delete this
+# workflow if you'd rather just check in on the repo manually every so often
+# (see docs/PLAN.md Phase 8) — it's an explicit choice, not a default you're
+# stuck with.
+on:
+  schedule:
+    - cron: "0 12 1 * *" # 1st of each month, 12:00 UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  keep-alive:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Touch keep-alive file and commit
+        run: |
+          mkdir -p .github
+          date -u +"%Y-%m-%dT%H:%M:%SZ" > .github/.keep-alive
+          git config user.name "keep-alive-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add .github/.keep-alive
+          git diff --cached --quiet || git commit -m "chore: keep-alive commit"
+          git push

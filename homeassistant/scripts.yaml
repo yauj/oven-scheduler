@@ -1,0 +1,30 @@
+# Copy the relevant script into your Home Assistant configuration.yaml's
+# scripts (or into scripts.yaml if you use the split-config layout).
+#
+# IMPORTANT: the entity_ids below are placeholders. geappliances-smarthq-
+# integration generates entity ids dynamically from whatever services the
+# SmartHQ cloud API reports for YOUR specific oven (see docs/PLAN.md Phase 2)
+# — go to Developer Tools -> States in Home Assistant, filter for your range,
+# and replace every entity_id below with the real ones before this will work.
+
+start_oven_convection_450:
+  alias: "Start oven - convection bake 450F"
+  sequence:
+    - service: select.select_option
+      target:
+        entity_id: select.range_oven_cook_mode   # REPLACE: your cook-mode select entity
+      data:
+        option: "Convection Bake"                # REPLACE: exact option string HA shows you
+    - delay:
+        seconds: 2
+    - service: number.set_value
+      target:
+        entity_id: number.range_oven_temperature # REPLACE: your temperature number entity
+      data:
+        value: 450
+    - delay:
+        seconds: 2
+    - service: button.press
+      target:
+        entity_id: button.range_oven_start       # REPLACE: your start/trigger button entity
+  mode: single

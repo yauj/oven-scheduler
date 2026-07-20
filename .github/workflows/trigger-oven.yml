@@ -1,0 +1,46 @@
+name: Trigger oven preheat
+
+# Fires every 15 minutes across an hour-wide UTC window that covers
+# 1:00 AM Pacific in both PST (UTC-8) and PDT (UTC-7), Monday-Thursday.
+# scripts/trigger_oven.py does the real time check against
+# America/Los_Angeles and no-ops outside a few minutes of the actual
+# target, so this never needs manual adjustment for DST.
+on:
+  schedule:
+    - cron: "0,15,30,45 8-9 * * 1-4"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Skip the time-window check and fire immediately (manual testing)"
+        type: boolean
+        default: false
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Trigger oven start script
+        env:
+          HA_URL: ${{ secrets.HA_URL }}
+          HA_TOKEN: ${{ secrets.HA_TOKEN }}
+          FORCE: ${{ (github.event_name == 'workflow_dispatch' && inputs.force) && '1' || '0' }}
+        run: python scripts/trigger_oven.py
+
+      - name: Notify on failure
+        if: failure()
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+        run: |
+          if [ -n "$NTFY_TOPIC" ]; then
+            curl -s -H "Title: Oven trigger failed" \
+                 -d "The scheduled oven preheat trigger failed. Check the GitHub Actions log." \
+                 "https://ntfy.sh/$NTFY_TOPIC" || true
+          else
+            echo "NTFY_TOPIC secret not set — skipping push notification. Relying on GitHub's default failure email."
+          fi
