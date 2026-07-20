@@ -3,10 +3,12 @@
 Connect directly to the SmartHQ cloud (via the gehomesdk library — no Home
 Assistant involved) and schedule the oven to start convection-bake preheat
 at 450F, delayed to begin at TARGET_START_HOUR:TARGET_START_MINUTE Pacific
-(default 6:00 AM). Designed to be called on a coarse cron schedule (see
-.github/workflows/trigger-oven.yml) around TARGET_HOUR:TARGET_MINUTE
-Pacific (default 1:00 AM) and to be a safe no-op outside that trigger
-window, so the workflow never needs manual DST adjustment.
+(default 6:00 AM). Designed to be called a handful of times by a coarse
+cron schedule (see .github/workflows/trigger-oven.yml) across a trigger
+window (default 1:00-2:00 AM Pacific) and to be a safe no-op outside that
+window. The cron schedule's UTC hours are pinned to the current Pacific UTC
+offset, not DST-safe — adjust the cron by 1 hour twice a year when clocks
+change, or accept the trigger window drifting by an hour until then.
 
 Notes from live probing against the real appliance (readback after every
 write, cross-checked against panel-set delay-starts):
@@ -54,13 +56,11 @@ Env vars optional:
   SMARTHQ_REGION      "US" or "EU". Default US.
   OVEN_CAVITY         "upper" or "lower" (which oven cavity's ERD codes to
                          use on a double oven). Default upper.
-  TARGET_HOUR         Target hour (24h, Pacific time) this script itself
-                         should fire at. Default 1 (1 AM).
-  TARGET_MINUTE       Target minute. Default 0.
-  WINDOW_MINUTES      How many minutes on either side of TARGET_HOUR:
-                         TARGET_MINUTE count as "close enough" to fire.
-                         Default 7 (matches the 15-minute cron cadence with
-                         margin for GitHub Actions scheduling lag).
+  TRIGGER_START_HOUR   Start of the window (24h, Pacific time) during which
+                         this script actually fires. Default 1 (1 AM).
+  TRIGGER_START_MINUTE Start minute. Default 0.
+  TRIGGER_END_HOUR     End of the window (exclusive). Default 2 (2 AM).
+  TRIGGER_END_MINUTE   End minute. Default 0.
   TARGET_START_HOUR   Target hour (24h, Pacific time) the oven should
                          actually start preheating at. Default 6 (6 AM).
   TARGET_START_MINUTE Target start minute. Default 0.
@@ -94,18 +94,25 @@ DELAYED_COOK_MODE = OvenCookMode(oven_state=ErdOvenState.CONV_MUTLI_BAKE, delaye
 
 
 def within_window() -> bool:
-    target_hour = int(os.environ.get("TARGET_HOUR", "1"))
-    target_minute = int(os.environ.get("TARGET_MINUTE", "0"))
-    window = int(os.environ.get("WINDOW_MINUTES", "7"))
+    """True if now (Pacific) falls within [TRIGGER_START_HOUR:MINUTE,
+    TRIGGER_END_HOUR:MINUTE) today. A range rather than a single target +/-
+    tolerance, so a late-firing or dropped cron tick doesn't cause the whole
+    night's trigger to be skipped — any tick that lands in the range fires
+    (the no-clobber guard in start_oven() makes a second successful tick in
+    the same window a harmless no-op)."""
+    start_hour = int(os.environ.get("TRIGGER_START_HOUR", "1"))
+    start_minute = int(os.environ.get("TRIGGER_START_MINUTE", "0"))
+    end_hour = int(os.environ.get("TRIGGER_END_HOUR", "2"))
+    end_minute = int(os.environ.get("TRIGGER_END_MINUTE", "0"))
 
     now = datetime.now(PACIFIC)
-    target_today = now.replace(hour=target_hour, minute=target_minute, second=0, microsecond=0)
-    delta_minutes = abs((now - target_today).total_seconds()) / 60
+    range_start = now.replace(hour=start_hour, minute=start_minute, second=0, microsecond=0)
+    range_end = now.replace(hour=end_hour, minute=end_minute, second=0, microsecond=0)
 
-    print(f"Current Pacific time: {now.isoformat()}; target: {target_today.isoformat()}; "
-          f"delta: {delta_minutes:.1f} min; window: +/-{window} min")
+    print(f"Current Pacific time: {now.isoformat()}; trigger window: "
+          f"[{range_start.isoformat()}, {range_end.isoformat()})")
 
-    return delta_minutes <= window
+    return range_start <= now < range_end
 
 
 def get_cook_mode_erd_code() -> "ErdCode":

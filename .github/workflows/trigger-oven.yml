@@ -1,13 +1,22 @@
 name: Trigger oven preheat
 
-# Fires every 15 minutes across an hour-wide UTC window that covers
-# 1:00 AM Pacific in both PST (UTC-8) and PDT (UTC-7), Monday-Thursday.
-# scripts/trigger_oven.py does the real time check against
-# America/Los_Angeles and no-ops outside a few minutes of the actual
-# target, so this never needs manual adjustment for DST.
+# Fires up to 5 times, 15 minutes apart, across the 1:00-2:00 AM Pacific
+# trigger window (Monday-Thursday). scripts/trigger_oven.py checks the real
+# time against America/Los_Angeles and no-ops outside that window; the
+# first tick that lands inside it arms the oven, and the no-clobber guard
+# in trigger_oven.py makes any later tick in the same window a harmless
+# no-op. This exists because GitHub's cron is best-effort and can run late
+# by more than a few minutes, so a single-shot trigger can get skipped
+# entirely — see the incident on 2026-07-20 where the only scheduled run
+# fired at 3:36 AM, outside the (much narrower) window that existed then.
+#
+# NOT DST-safe: 8:00-8:59 UTC = 1:00-1:59 AM Pacific only while PDT (UTC-7)
+# is in effect. Shift the cron hour and TRIGGER_START/END_HOUR below by 1
+# (to 9 UTC / 2-3 AM Pacific) for PST (UTC-8), or accept the trigger window
+# drifting by an hour until the next edit.
 on:
   schedule:
-    - cron: "0,15,30,45 8-9 * * 1-4"
+    - cron: "0,15,30,45,59 8 * * 1-4"
   workflow_dispatch:
     inputs:
       force:
@@ -33,6 +42,12 @@ env:
   TARGET_TEMP: "450"
   TARGET_START_HOUR: "6"
   TARGET_START_MINUTE: "0"
+  # Must line up with the cron schedule above (currently 8:00-8:59 UTC =
+  # 1:00-1:59 AM Pacific during PDT).
+  TRIGGER_START_HOUR: "1"
+  TRIGGER_START_MINUTE: "0"
+  TRIGGER_END_HOUR: "2"
+  TRIGGER_END_MINUTE: "0"
 
 jobs:
   trigger:
@@ -56,6 +71,10 @@ jobs:
           TARGET_TEMP: ${{ (github.event_name == 'workflow_dispatch' && inputs.target_temp != '' && inputs.target_temp) || env.TARGET_TEMP }}
           TARGET_START_HOUR: ${{ (github.event_name == 'workflow_dispatch' && inputs.target_start_hour != '' && inputs.target_start_hour) || env.TARGET_START_HOUR }}
           TARGET_START_MINUTE: ${{ (github.event_name == 'workflow_dispatch' && inputs.target_start_minute != '' && inputs.target_start_minute) || env.TARGET_START_MINUTE }}
+          TRIGGER_START_HOUR: ${{ env.TRIGGER_START_HOUR }}
+          TRIGGER_START_MINUTE: ${{ env.TRIGGER_START_MINUTE }}
+          TRIGGER_END_HOUR: ${{ env.TRIGGER_END_HOUR }}
+          TRIGGER_END_MINUTE: ${{ env.TRIGGER_END_MINUTE }}
         run: python scripts/trigger_oven.py
 
       - name: Notify on failure
