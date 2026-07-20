@@ -1,28 +1,24 @@
 name: Trigger oven preheat
 
-# Fires up to 5 times, 15 minutes apart, across the 1:00-2:00 AM Pacific
-# trigger window (Monday-Thursday). scripts/trigger_oven.py checks the real
-# time against America/Los_Angeles and no-ops outside that window; the
-# first tick that lands inside it arms the oven, and the no-clobber guard
-# in trigger_oven.py makes any later tick in the same window a harmless
-# no-op. This exists because GitHub's cron is best-effort and can run late
-# by more than a few minutes, so a single-shot trigger can get skipped
-# entirely — see the incident on 2026-07-20 where the only scheduled run
-# fired at 3:36 AM, outside the (much narrower) window that existed then.
+# Fires up to 5 times, 15 minutes apart, in the early-morning hours
+# (Monday-Thursday). Each tick just runs scripts/trigger_oven.py directly —
+# there's no time-of-day gate in the script itself, since GitHub's cron is
+# best-effort and can run a scheduled job substantially later than its
+# nominal time (e.g. the incident on 2026-07-20 where the only scheduled
+# run that night fired at 3:36 AM instead of ~1 AM); the intent is "run
+# once, sometime in this general window," not "run at a precise minute," so
+# a late tick still doing its job is fine. The no-clobber guard in
+# trigger_oven.py is what keeps repeated ticks from re-arming the oven more
+# than once.
 #
 # NOT DST-safe: 8:00-8:59 UTC = 1:00-1:59 AM Pacific only while PDT (UTC-7)
-# is in effect. Shift the cron hour and TRIGGER_START/END_HOUR below by 1
-# (to 9 UTC / 2-3 AM Pacific) for PST (UTC-8), or accept the trigger window
-# drifting by an hour until the next edit.
+# is in effect. Shift the cron hour by 1 (to 9 UTC / 2-3 AM Pacific) for
+# PST (UTC-8), or accept the window drifting by an hour until the next edit.
 on:
   schedule:
     - cron: "0,15,30,45,59 8 * * 1-4"
   workflow_dispatch:
     inputs:
-      force:
-        description: "Skip the time-window check and fire immediately (manual testing)"
-        type: boolean
-        default: false
       target_temp:
         description: "Override TARGET_TEMP (Fahrenheit) for this manual run"
         type: string
@@ -42,12 +38,6 @@ env:
   TARGET_TEMP: "450"
   TARGET_START_HOUR: "6"
   TARGET_START_MINUTE: "0"
-  # Must line up with the cron schedule above (currently 8:00-8:59 UTC =
-  # 1:00-1:59 AM Pacific during PDT).
-  TRIGGER_START_HOUR: "1"
-  TRIGGER_START_MINUTE: "0"
-  TRIGGER_END_HOUR: "2"
-  TRIGGER_END_MINUTE: "0"
 
 jobs:
   trigger:
@@ -67,14 +57,9 @@ jobs:
           SMARTHQ_USERNAME: ${{ secrets.SMARTHQ_USERNAME }}
           SMARTHQ_REFRESH_TOKEN: ${{ secrets.SMARTHQ_REFRESH_TOKEN }}
           OVEN_MAC: ${{ secrets.OVEN_MAC }}
-          FORCE: ${{ (github.event_name == 'workflow_dispatch' && inputs.force) && '1' || '0' }}
           TARGET_TEMP: ${{ (github.event_name == 'workflow_dispatch' && inputs.target_temp != '' && inputs.target_temp) || env.TARGET_TEMP }}
           TARGET_START_HOUR: ${{ (github.event_name == 'workflow_dispatch' && inputs.target_start_hour != '' && inputs.target_start_hour) || env.TARGET_START_HOUR }}
           TARGET_START_MINUTE: ${{ (github.event_name == 'workflow_dispatch' && inputs.target_start_minute != '' && inputs.target_start_minute) || env.TARGET_START_MINUTE }}
-          TRIGGER_START_HOUR: ${{ env.TRIGGER_START_HOUR }}
-          TRIGGER_START_MINUTE: ${{ env.TRIGGER_START_MINUTE }}
-          TRIGGER_END_HOUR: ${{ env.TRIGGER_END_HOUR }}
-          TRIGGER_END_MINUTE: ${{ env.TRIGGER_END_MINUTE }}
         run: python scripts/trigger_oven.py
 
       - name: Notify on failure

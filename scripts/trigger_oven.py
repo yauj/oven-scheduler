@@ -4,11 +4,14 @@ Connect directly to the SmartHQ cloud (via the gehomesdk library — no Home
 Assistant involved) and schedule the oven to start convection-bake preheat
 at 450F, delayed to begin at TARGET_START_HOUR:TARGET_START_MINUTE Pacific
 (default 6:00 AM). Designed to be called a handful of times by a coarse
-cron schedule (see .github/workflows/trigger-oven.yml) across a trigger
-window (default 1:00-2:00 AM Pacific) and to be a safe no-op outside that
-window. The cron schedule's UTC hours are pinned to the current Pacific UTC
-offset, not DST-safe — adjust the cron by 1 hour twice a year when clocks
-change, or accept the trigger window drifting by an hour until then.
+cron schedule (see .github/workflows/trigger-oven.yml) sometime in the
+early-morning hours; this script has no time-of-day gate of its own and
+just runs whenever it's invoked — GitHub's cron is best-effort and can run
+a scheduled job substantially later than its nominal time, and the
+intent here is "run once, sometime in that general window" rather than "run
+at a precise minute," so a late invocation still doing its job is fine.
+The no-clobber guard below is what keeps repeated ticks in the same
+schedule window from re-arming the oven more than once.
 
 Notes from live probing against the real appliance (readback after every
 write, cross-checked against panel-set delay-starts):
@@ -56,34 +59,19 @@ Env vars optional:
   SMARTHQ_REGION      "US" or "EU". Default US.
   OVEN_CAVITY         "upper" or "lower" (which oven cavity's ERD codes to
                          use on a double oven). Default upper.
-  TRIGGER_START_HOUR   Start of the window (24h, Pacific time) during which
-                         this script actually fires. Default 1 (1 AM).
-  TRIGGER_START_MINUTE Start minute. Default 0.
-  TRIGGER_END_HOUR     End of the window (exclusive). Default 2 (2 AM).
-  TRIGGER_END_MINUTE   End minute. Default 0.
   TARGET_START_HOUR   Target hour (24h, Pacific time) the oven should
                          actually start preheating at. Default 6 (6 AM).
   TARGET_START_MINUTE Target start minute. Default 0.
   TARGET_TEMP         Target temperature, Fahrenheit. Default 450.
-  FORCE                If set to "1", skip the time check and fire
-                         immediately (the oven still waits until
-                         TARGET_START_HOUR:TARGET_START_MINUTE — that target
-                         is a fixed clock time, not relative to when this
-                         script runs). Used for manual workflow_dispatch
-                         testing.
 """
 import asyncio
 import os
 import sys
-from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
 
 import aiohttp
 from gehomesdk import ErdCode, GeWebsocketClient
 from gehomesdk.erd.values.oven import ErdOvenCookMode, ErdOvenState, OvenCookMode
 from gehomesdk.erd.values.oven.oven_cook_mode_mapping import OVEN_COOK_MODE_MAP
-
-PACIFIC = ZoneInfo("America/Los_Angeles")
 
 CONNECT_TIMEOUT_SECONDS = 180
 WRITE_RETRIES = 5
@@ -91,28 +79,6 @@ WRITE_VERIFY_DELAY_SECONDS = 10
 
 # CONV_MUTLI_BAKE + delayed=True encodes to ErdOvenCookMode.CONVMULTIBAKE_DELAYSTART.
 DELAYED_COOK_MODE = OvenCookMode(oven_state=ErdOvenState.CONV_MUTLI_BAKE, delayed=True)
-
-
-def within_window() -> bool:
-    """True if now (Pacific) falls within [TRIGGER_START_HOUR:MINUTE,
-    TRIGGER_END_HOUR:MINUTE) today. A range rather than a single target +/-
-    tolerance, so a late-firing or dropped cron tick doesn't cause the whole
-    night's trigger to be skipped — any tick that lands in the range fires
-    (the no-clobber guard in start_oven() makes a second successful tick in
-    the same window a harmless no-op)."""
-    start_hour = int(os.environ.get("TRIGGER_START_HOUR", "1"))
-    start_minute = int(os.environ.get("TRIGGER_START_MINUTE", "0"))
-    end_hour = int(os.environ.get("TRIGGER_END_HOUR", "2"))
-    end_minute = int(os.environ.get("TRIGGER_END_MINUTE", "0"))
-
-    now = datetime.now(PACIFIC)
-    range_start = now.replace(hour=start_hour, minute=start_minute, second=0, microsecond=0)
-    range_end = now.replace(hour=end_hour, minute=end_minute, second=0, microsecond=0)
-
-    print(f"Current Pacific time: {now.isoformat()}; trigger window: "
-          f"[{range_start.isoformat()}, {range_end.isoformat()})")
-
-    return range_start <= now < range_end
 
 
 def get_cook_mode_erd_code() -> "ErdCode":
@@ -271,16 +237,7 @@ async def start_oven() -> None:
 
 
 def main() -> None:
-    force = os.environ.get("FORCE", "0") == "1"
-
-    if not force and not within_window():
-        print("Outside target window and FORCE not set — no-op, exiting cleanly.")
-        sys.exit(0)
-
-    if force:
-        print("FORCE=1 set — skipping time check.")
-
-    print("Within window (or forced) — connecting to SmartHQ to start the oven.")
+    print("Connecting to SmartHQ to start the oven.")
     asyncio.run(start_oven())
     print("Done.")
 

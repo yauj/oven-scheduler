@@ -1,10 +1,10 @@
 # oven-scheduler
 
 Automatically starts a GE range in convection bake mode, Monday–Thursday.
-A GitHub Actions workflow fires around 1:00 AM Pacific and connects
-directly to the SmartHQ cloud (via the `gehomesdk` Python library) to
-schedule a delayed start. No Home Assistant or other always-on server
-required.
+A GitHub Actions workflow fires a handful of times between roughly 1:00
+and 2:00 AM Pacific and connects directly to the SmartHQ cloud (via the
+`gehomesdk` Python library) to schedule a delayed start. No Home Assistant
+or other always-on server required.
 
 Target temperature and start time are both configurable — see
 `.github/workflows/trigger-oven.yml`.
@@ -32,6 +32,5 @@ requirements.txt              gehomesdk + aiohttp
 pip install -r requirements.txt
 cp .env.example .env   # fill in real values
 export $(grep -v '^#' .env | xargs)
-python scripts/trigger_oven.py            # respects the time window
-FORCE=1 python scripts/trigger_oven.py    # bypasses it, fires immediately
+python scripts/trigger_oven.py
 ```

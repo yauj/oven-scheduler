@@ -76,7 +76,7 @@ Before wiring up scheduling, confirm the command itself works end-to-end:
 ```bash
 cp .env.example .env   # fill in SMARTHQ_USERNAME, SMARTHQ_REFRESH_TOKEN, OVEN_MAC
 export $(grep -v '^#' .env | xargs)
-FORCE=1 python scripts/trigger_oven.py    # bypasses the time gate, fires immediately
+python scripts/trigger_oven.py
 ```
 
 Watch the oven (or the SmartHQ app) to confirm it actually enters convection bake preheat at
@@ -94,8 +94,9 @@ In the repo: Settings → Secrets and variables → Actions, add:
 See `docs/PROPOSAL.md` for the full reasoning behind the trigger design; summary of what's
 implemented in `.github/workflows/trigger-oven.yml`:
 
-- Cron runs every 15 minutes across an hour-wide UTC window that covers 1:00 AM Pacific in both PST and PDT, Monday–Thursday.
-- The workflow calls `scripts/trigger_oven.py`, which checks the real current time in `America/Los_Angeles` and only proceeds if it's within a couple minutes of 1:00 AM — otherwise it exits as a no-op. This means the schedule never needs manual DST adjustment.
+- Cron runs up to 5 times, 15 minutes apart, in the 1:00–2:00 AM Pacific hour, Monday–Thursday. Each tick just runs `scripts/trigger_oven.py` directly — the script has no time-of-day gate of its own, since GitHub's cron is best-effort and can run a job substantially later than its nominal time, and the goal is "fire once, sometime in this window" rather than a precise minute.
+- The no-clobber guard in `trigger_oven.py` (it aborts if the oven isn't already off) is what keeps repeated ticks in the same window from re-arming the oven more than once.
+- Not DST-safe: the cron's UTC hour needs a manual 1-hour shift twice a year (see the comment in `trigger-oven.yml`).
 
 ## Phase 4 — Failure notification
 
@@ -109,9 +110,8 @@ optional `NTFY_TOPIC` secret to enable the push notification.
 
 ## Phase 5 — Testing plan
 
-1. Manually dispatch the GitHub Actions workflow (`workflow_dispatch` trigger, included) outside the 1 AM window and confirm the time-gate correctly no-ops.
-2. Use `workflow_dispatch` with the `force` input (included) to bypass the gate and fire the oven immediately, so you can validate the whole chain in CI without waiting for 1 AM.
-3. Let it run unattended for the first real Mon–Thu cycle, but verify manually (visually or via the SmartHQ app's history) that the oven actually reached temperature by 6 AM before fully trusting it.
+1. Manually dispatch the GitHub Actions workflow (`workflow_dispatch` trigger, included) any time to validate the whole chain in CI without waiting for the scheduled window.
+2. Let it run unattended for the first real Mon–Thu cycle, but verify manually (visually or via the SmartHQ app's history) that the oven actually reached temperature by 6 AM before fully trusting it.
 
 ## Phase 6 — Ongoing maintenance
 
