@@ -85,7 +85,9 @@ from gehomesdk.erd.values.oven.oven_cook_mode_mapping import OVEN_COOK_MODE_MAP
 
 PACIFIC = ZoneInfo("America/Los_Angeles")
 
-CONNECT_TIMEOUT_SECONDS = 60
+CONNECT_TIMEOUT_SECONDS = 180
+WRITE_RETRIES = 5
+WRITE_VERIFY_DELAY_SECONDS = 10
 
 # CONV_MUTLI_BAKE + delayed=True encodes to ErdOvenCookMode.CONVMULTIBAKE_DELAYSTART.
 DELAYED_COOK_MODE = OvenCookMode(oven_state=ErdOvenState.CONV_MUTLI_BAKE, delayed=True)
@@ -196,11 +198,12 @@ async def start_oven() -> None:
             appliance = client.appliances[mac_addr.upper()]
 
             # A write sent immediately after the appliance first appears has
-            # been observed to be silently dropped (same bytes succeeded a
-            # few seconds later, and always succeeded when set from the
-            # oven's own panel) — likely a race while the appliance's
-            # connection/state is still settling. Give it a moment.
-            await asyncio.sleep(5)
+            # been observed to be silently dropped (same bytes succeeded when
+            # set from the oven's own panel, and succeeded from this script
+            # after waiting longer) — likely a race while the appliance's
+            # connection/state is still settling. 5s wasn't reliably enough;
+            # 15s was, in testing. Give it a moment.
+            await asyncio.sleep(15)
 
             current_state = get_current_oven_state(appliance, cook_mode_erd)
             print(f"Current {cook_mode_erd.name} state: {current_state.name}")
@@ -211,10 +214,29 @@ async def start_oven() -> None:
                     "override it."
                 )
 
-            print(f"Found appliance {mac_addr}; setting {cook_mode_erd.name} -> {raw_hex}")
-            await client.async_set_erd_value(appliance, cook_mode_erd, raw_hex)
-            print("Command sent.")
-            result["ok"] = True
+            # Writes have been observed to be silently dropped by the
+            # appliance (accepted by the SmartHQ cloud with no error, but
+            # the appliance's own reported cook-mode state never changes) —
+            # cause not fully understood, so verify the write actually
+            # landed and retry a few times rather than trusting a clean
+            # cloud ack alone.
+            last_error = None
+            for attempt in range(1, WRITE_RETRIES + 1):
+                print(f"Attempt {attempt}/{WRITE_RETRIES}: setting {cook_mode_erd.name} -> {raw_hex}")
+                await client.async_set_erd_value(appliance, cook_mode_erd, raw_hex)
+
+                await asyncio.sleep(WRITE_VERIFY_DELAY_SECONDS)
+                new_state = get_current_oven_state(appliance, cook_mode_erd)
+                if new_state == DELAYED_COOK_MODE.oven_state:
+                    print(f"Verified: {cook_mode_erd.name} is now {new_state.name}.")
+                    result["ok"] = True
+                    break
+
+                last_error = (f"After write, {cook_mode_erd.name} reads {new_state.name}, "
+                              f"expected {DELAYED_COOK_MODE.oven_state.name} — write did not stick.")
+                print(f"{last_error} Retrying." if attempt < WRITE_RETRIES else last_error)
+            else:
+                result["error"] = last_error
         except Exception as e:  # noqa: BLE001 - surface any failure to caller
             result["error"] = str(e)
         finally:

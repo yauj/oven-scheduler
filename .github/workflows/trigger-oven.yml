@@ -14,6 +14,25 @@ on:
         description: "Skip the time-window check and fire immediately (manual testing)"
         type: boolean
         default: false
+      target_temp:
+        description: "Override TARGET_TEMP (Fahrenheit) for this manual run"
+        type: string
+        default: ""
+      target_start_hour:
+        description: "Override TARGET_START_HOUR (24h Pacific) for this manual run"
+        type: string
+        default: ""
+      target_start_minute:
+        description: "Override TARGET_START_MINUTE for this manual run"
+        type: string
+        default: ""
+
+env:
+  # Schedule config, in one place so it's easy to change without touching
+  # trigger_oven.py. See scripts/trigger_oven.py for what each var does.
+  TARGET_TEMP: "450"
+  TARGET_START_HOUR: "6"
+  TARGET_START_MINUTE: "0"
 
 jobs:
   trigger:
@@ -34,6 +53,9 @@ jobs:
           SMARTHQ_REFRESH_TOKEN: ${{ secrets.SMARTHQ_REFRESH_TOKEN }}
           OVEN_MAC: ${{ secrets.OVEN_MAC }}
           FORCE: ${{ (github.event_name == 'workflow_dispatch' && inputs.force) && '1' || '0' }}
+          TARGET_TEMP: ${{ (github.event_name == 'workflow_dispatch' && inputs.target_temp != '' && inputs.target_temp) || env.TARGET_TEMP }}
+          TARGET_START_HOUR: ${{ (github.event_name == 'workflow_dispatch' && inputs.target_start_hour != '' && inputs.target_start_hour) || env.TARGET_START_HOUR }}
+          TARGET_START_MINUTE: ${{ (github.event_name == 'workflow_dispatch' && inputs.target_start_minute != '' && inputs.target_start_minute) || env.TARGET_START_MINUTE }}
         run: python scripts/trigger_oven.py
 
       - name: Notify on failure

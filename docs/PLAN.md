@@ -1,6 +1,6 @@
 # Implementation Plan: Automated Oven Preheat Scheduler
 
-**Goal:** Every Monday–Thursday, automatically start the GE Profile PHS930YPFS range at 6:00 AM Pacific in convection bake mode at 450°F, triggered by a job that fires at 1:00 AM Pacific.
+**Goal:** Every Monday–Thursday, automatically start a GE range at 6:00 AM Pacific in convection bake mode at 450°F, triggered by a job that fires at 1:00 AM Pacific. Both the target time and temperature are configurable.
 
 **Status:** Draft plan for an agent/developer to execute step by step. Each phase has a concrete deliverable and a checkpoint before moving on. Do not skip Phase 0 — it determines whether the rest of the plan is even viable.
 
