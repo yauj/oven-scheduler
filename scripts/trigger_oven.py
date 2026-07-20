@@ -1,33 +1,89 @@
 #!/usr/bin/env python3
 """
-Trigger the Home Assistant script that starts the oven in convection bake
-mode at 450F. Designed to be called on a coarse cron schedule (see
-.github/workflows/trigger-oven.yml) and to be a safe no-op outside the
-actual target time, so the workflow never needs manual DST adjustment.
+Connect directly to the SmartHQ cloud (via the gehomesdk library — no Home
+Assistant involved) and schedule the oven to start convection-bake preheat
+at 450F, delayed to begin at TARGET_START_HOUR:TARGET_START_MINUTE Pacific
+(default 6:00 AM). Designed to be called on a coarse cron schedule (see
+.github/workflows/trigger-oven.yml) around TARGET_HOUR:TARGET_MINUTE
+Pacific (default 1:00 AM) and to be a safe no-op outside that trigger
+window, so the workflow never needs manual DST adjustment.
+
+Notes from live probing against the real appliance (readback after every
+write, cross-checked against panel-set delay-starts):
+
+- This oven advertises "Convection Multi Bake" (ErdOvenState.CONV_MUTLI_BAKE)
+  rather than plain "Convection Bake" (ErdOvenState.CONV_BAKE) in its
+  UPPER_OVEN_AVAILABLE_COOK_MODES. Sending CONV_BAKE was silently ignored by
+  the appliance; CONV_MUTLI_BAKE is what the panel's "Convection Bake"
+  button actually maps to on this model/ERD generation.
+- The delay-start target time is NOT encoded as a duration or as a single
+  minutes-since-midnight integer, despite gehomesdk's OvenCookSetting
+  modeling it as a plain `delay_time: timedelta` (which erd_encode_timespan
+  serializes as one big-endian 16-bit total-minutes value). The appliance
+  actually wants two separate bytes: [hour_byte][minute_byte], 24h clock,
+  e.g. 6:00 AM -> bytes (0x06, 0x00). Values that don't fit that shape
+  (minute byte > 59, i.e. anything sent as "N minutes" for N >= 60 via the
+  SDK's encoding) get silently rejected back to Off. Since
+  timedelta.seconds caps at 86399 (just under 24h), erd_encode_timespan's
+  `.seconds // 60` can never produce a value >= 1440 anyway, so target hours
+  6 AM and later are structurally impossible to reach through
+  OvenCookSetting.delay_time — this script instead builds the
+  UPPER/LOWER_OVEN_COOK_MODE payload's raw hex directly and writes it via
+  the low-level GeWebsocketClient.async_set_erd_value(), bypassing the
+  OvenCookSetting/erd_encode_timespan path entirely for this one field.
+
+Auth: SmartHQ accounts with MFA enabled can't complete a login unattended,
+so this script never does a fresh username/password login. Instead it
+authenticates with a long-lived refresh token obtained once, interactively,
+via scripts/get_refresh_token.py (see docs/PLAN.md Phase "one-time auth
+setup"). If GE forces that refresh token to expire, re-run
+get_refresh_token.py and update the SMARTHQ_REFRESH_TOKEN secret.
 
 Env vars required:
-  HA_URL     Base URL of the Home Assistant instance, e.g. https://my-ha.example.com
-  HA_TOKEN   Long-lived access token with permission to call services
+  SMARTHQ_USERNAME         SmartHQ account email
+  SMARTHQ_REFRESH_TOKEN    Refresh token from scripts/get_refresh_token.py
+  OVEN_MAC                 MAC address (appliance id) of the range, from
+                             scripts/get_refresh_token.py's discovery output
 
 Env vars optional:
-  TARGET_HOUR     Target hour (24h, Pacific time) to fire at. Default 1 (1 AM).
-  TARGET_MINUTE   Target minute. Default 0.
-  WINDOW_MINUTES  How many minutes on either side of the target count as
-                   "close enough" to fire. Default 7 (matches the 15-minute
-                   cron cadence with margin for GitHub Actions scheduling lag).
-  SCRIPT_ENTITY   The HA script entity to call. Default script.start_oven_convection_450.
-  FORCE           If set to "1", skip the time check and fire immediately.
-                   Used for manual workflow_dispatch testing.
+  SMARTHQ_REGION      "US" or "EU". Default US.
+  OVEN_CAVITY         "upper" or "lower" (which oven cavity's ERD codes to
+                         use on a double oven). Default upper.
+  TARGET_HOUR         Target hour (24h, Pacific time) this script itself
+                         should fire at. Default 1 (1 AM).
+  TARGET_MINUTE       Target minute. Default 0.
+  WINDOW_MINUTES      How many minutes on either side of TARGET_HOUR:
+                         TARGET_MINUTE count as "close enough" to fire.
+                         Default 7 (matches the 15-minute cron cadence with
+                         margin for GitHub Actions scheduling lag).
+  TARGET_START_HOUR   Target hour (24h, Pacific time) the oven should
+                         actually start preheating at. Default 6 (6 AM).
+  TARGET_START_MINUTE Target start minute. Default 0.
+  TARGET_TEMP         Target temperature, Fahrenheit. Default 450.
+  FORCE                If set to "1", skip the time check and fire
+                         immediately (the oven still waits until
+                         TARGET_START_HOUR:TARGET_START_MINUTE — that target
+                         is a fixed clock time, not relative to when this
+                         script runs). Used for manual workflow_dispatch
+                         testing.
 """
+import asyncio
 import os
 import sys
-import json
-import urllib.request
-import urllib.error
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
+import aiohttp
+from gehomesdk import ErdCode, GeWebsocketClient
+from gehomesdk.erd.values.oven import ErdOvenState, OvenCookMode
+from gehomesdk.erd.values.oven.oven_cook_mode_mapping import OVEN_COOK_MODE_MAP
+
 PACIFIC = ZoneInfo("America/Los_Angeles")
+
+CONNECT_TIMEOUT_SECONDS = 60
+
+# CONV_MUTLI_BAKE + delayed=True encodes to ErdOvenCookMode.CONVMULTIBAKE_DELAYSTART.
+DELAYED_COOK_MODE = OvenCookMode(oven_state=ErdOvenState.CONV_MUTLI_BAKE, delayed=True)
 
 
 def within_window() -> bool:
@@ -45,46 +101,112 @@ def within_window() -> bool:
     return delta_minutes <= window
 
 
-def call_ha_script() -> None:
-    ha_url = os.environ.get("HA_URL")
-    ha_token = os.environ.get("HA_TOKEN")
-    script_entity = os.environ.get("SCRIPT_ENTITY", "script.start_oven_convection_450")
+def get_cook_mode_erd_code() -> "ErdCode":
+    cavity = os.environ.get("OVEN_CAVITY", "upper").strip().lower()
+    if cavity == "lower":
+        return ErdCode.LOWER_OVEN_COOK_MODE
+    if cavity == "upper":
+        return ErdCode.UPPER_OVEN_COOK_MODE
+    print(f"ERROR: OVEN_CAVITY '{cavity}' must be 'upper' or 'lower'.", file=sys.stderr)
+    sys.exit(1)
 
-    if not ha_url or not ha_token:
-        print("ERROR: HA_URL and HA_TOKEN must be set.", file=sys.stderr)
+
+def get_start_hour_minute() -> tuple[int, int]:
+    start_hour = int(os.environ.get("TARGET_START_HOUR", "6"))
+    start_minute = int(os.environ.get("TARGET_START_MINUTE", "0"))
+    if not (0 <= start_hour <= 23) or not (0 <= start_minute <= 59):
+        print(f"ERROR: TARGET_START_HOUR/MINUTE must be 0-23 / 0-59, "
+              f"got {start_hour}:{start_minute}.", file=sys.stderr)
         sys.exit(1)
+    return start_hour, start_minute
 
-    # entity_id looks like script.start_oven_convection_450 -> service call
-    # goes to script/<object_id>
-    if "." not in script_entity:
-        print(f"ERROR: SCRIPT_ENTITY '{script_entity}' is not a valid entity id "
-              f"(expected domain.object_id).", file=sys.stderr)
-        sys.exit(1)
-    domain, object_id = script_entity.split(".", 1)
 
-    url = f"{ha_url.rstrip('/')}/api/services/{domain}/{object_id}"
-    req = urllib.request.Request(
-        url,
-        data=json.dumps({}).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {ha_token}",
-            "Content-Type": "application/json",
-        },
-        method="POST",
+def build_delayed_cook_mode_hex(temperature: int, start_hour: int, start_minute: int) -> str:
+    """Build the raw UPPER/LOWER_OVEN_COOK_MODE payload by hand. See the module
+    docstring for why OvenCookSetting.delay_time can't express this field."""
+    cook_mode_code = OVEN_COOK_MODE_MAP.inverse[DELAYED_COOK_MODE].value
+    return (
+        cook_mode_code.to_bytes(1, "big").hex()
+        + temperature.to_bytes(2, "big").hex()
+        + (0).to_bytes(2, "big").hex()  # cook_time
+        + (0).to_bytes(2, "big").hex()  # probe_temperature
+        + bytes([start_hour, start_minute]).hex()  # delay_time: [hour][minute]
+        + (0).to_bytes(2, "big").hex()  # two_temp_cook_temperature
+        + (0).to_bytes(2, "big").hex()  # two_temp_cook_time
     )
 
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            body = resp.read().decode("utf-8")
-            print(f"HA responded {resp.status}: {body}")
-            if resp.status >= 300:
-                sys.exit(1)
-    except urllib.error.HTTPError as e:
-        print(f"ERROR calling Home Assistant: HTTP {e.code} - {e.read().decode('utf-8', 'ignore')}",
+
+async def start_oven() -> None:
+    username = os.environ.get("SMARTHQ_USERNAME")
+    refresh_token = os.environ.get("SMARTHQ_REFRESH_TOKEN")
+    mac_addr = os.environ.get("OVEN_MAC")
+    region = os.environ.get("SMARTHQ_REGION", "US")
+    target_temp = int(os.environ.get("TARGET_TEMP", "450"))
+
+    if not username or not refresh_token or not mac_addr:
+        print("ERROR: SMARTHQ_USERNAME, SMARTHQ_REFRESH_TOKEN, and OVEN_MAC must be set.",
               file=sys.stderr)
         sys.exit(1)
-    except urllib.error.URLError as e:
-        print(f"ERROR calling Home Assistant: {e.reason}", file=sys.stderr)
+
+    cook_mode_erd = get_cook_mode_erd_code()
+    start_hour, start_minute = get_start_hour_minute()
+    raw_hex = build_delayed_cook_mode_hex(target_temp, start_hour, start_minute)
+    print(f"Scheduling delay-start for {start_hour:02d}:{start_minute:02d} local time "
+          f"(raw {cook_mode_erd.name} payload: {raw_hex})")
+
+    loop = asyncio.get_event_loop()
+    # Password is unused on this path — a refresh token skips the full
+    # login flow entirely, so it never re-triggers an MFA challenge.
+    client = GeWebsocketClient(username, "", region, loop, refresh_token=refresh_token)
+
+    done = asyncio.Event()
+    result: dict = {"ok": False, "error": None}
+
+    async def on_connected(*_args):
+        try:
+            for _ in range(30):
+                if mac_addr.upper() in client.appliances:
+                    break
+                await asyncio.sleep(1)
+            else:
+                raise RuntimeError(f"Oven with MAC {mac_addr} never appeared after connecting.")
+
+            appliance = client.appliances[mac_addr.upper()]
+
+            # A write sent immediately after the appliance first appears has
+            # been observed to be silently dropped (same bytes succeeded a
+            # few seconds later, and always succeeded when set from the
+            # oven's own panel) — likely a race while the appliance's
+            # connection/state is still settling. Give it a moment.
+            await asyncio.sleep(5)
+
+            print(f"Found appliance {mac_addr}; setting {cook_mode_erd.name} -> {raw_hex}")
+            await client.async_set_erd_value(appliance, cook_mode_erd, raw_hex)
+            print("Command sent.")
+            result["ok"] = True
+        except Exception as e:  # noqa: BLE001 - surface any failure to caller
+            result["error"] = str(e)
+        finally:
+            done.set()
+
+    client.add_event_handler("connected", on_connected)
+
+    async with aiohttp.ClientSession() as session:
+        run_task = loop.create_task(client.async_get_credentials_and_run(session))
+        try:
+            await asyncio.wait_for(done.wait(), timeout=CONNECT_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            result["error"] = f"Timed out after {CONNECT_TIMEOUT_SECONDS}s waiting to connect/send command."
+        finally:
+            await client.disconnect()
+            run_task.cancel()
+            try:
+                await run_task
+            except asyncio.CancelledError:
+                pass
+
+    if not result["ok"]:
+        print(f"ERROR: {result['error']}", file=sys.stderr)
         sys.exit(1)
 
 
@@ -98,8 +220,8 @@ def main() -> None:
     if force:
         print("FORCE=1 set — skipping time check.")
 
-    print("Within window (or forced) — calling Home Assistant to start the oven.")
-    call_ha_script()
+    print("Within window (or forced) — connecting to SmartHQ to start the oven.")
+    asyncio.run(start_oven())
     print("Done.")
 
 

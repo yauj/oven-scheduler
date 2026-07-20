@@ -25,10 +25,14 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
       - name: Trigger oven start script
         env:
-          HA_URL: ${{ secrets.HA_URL }}
-          HA_TOKEN: ${{ secrets.HA_TOKEN }}
+          SMARTHQ_USERNAME: ${{ secrets.SMARTHQ_USERNAME }}
+          SMARTHQ_REFRESH_TOKEN: ${{ secrets.SMARTHQ_REFRESH_TOKEN }}
+          OVEN_MAC: ${{ secrets.OVEN_MAC }}
           FORCE: ${{ (github.event_name == 'workflow_dispatch' && inputs.force) && '1' || '0' }}
         run: python scripts/trigger_oven.py
 
