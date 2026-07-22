@@ -7,7 +7,9 @@ and 2:00 AM Pacific and connects directly to the SmartHQ cloud (via the
 or other always-on server required.
 
 Target temperature and start time are both configurable — see
-`.github/workflows/trigger-oven.yml`.
+`.github/workflows/trigger-oven.yml`. Every run posts a success or failure
+alert to Discord via `scripts/notify_discord.sh` — set the optional
+`DISCORD_WEBHOOK_URL` repo secret to enable it.
 
 ## Repo layout
 
@@ -19,6 +21,7 @@ docs/
 scripts/
   get_refresh_token.py       one-time interactive auth + appliance discovery
   trigger_oven.py            called by the GitHub Actions workflow
+  notify_discord.sh          posts success/failure alerts to a Discord webhook
 .github/workflows/
   trigger-oven.yml           the scheduled trigger (Mon-Thu, ~1 AM Pacific)
   keep-alive.yml              monthly commit so GitHub doesn't auto-disable the schedule

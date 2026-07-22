@@ -98,15 +98,11 @@ implemented in `.github/workflows/trigger-oven.yml`:
 - The no-clobber guard in `trigger_oven.py` (it aborts if the oven isn't already off) is what keeps repeated ticks in the same window from re-arming the oven more than once.
 - Not DST-safe: the cron's UTC hour needs a manual 1-hour shift twice a year (see the comment in `trigger-oven.yml`).
 
-## Phase 4 — Failure notification
+## Phase 4 — Notifications (success and failure)
 
-A silent failure here means a cold oven at 6 AM, which is worse than no automation at all — you won't know to intervene manually. Add a notification step so failures aren't silent:
+A silent failure here means a cold oven at 6 AM, which is worse than no automation at all — you won't know to intervene manually. Just as important: a silent success means you can't tell "it ran and worked" from "the schedule quietly broke weeks ago" without checking the Actions log yourself. Both outcomes post to a Discord channel via an incoming webhook (`scripts/notify_discord.sh`), mirroring the `notify_()` / `sendDiscordMessage_()` pattern in the sibling Daily Prayer Video Apps Script project — a colored embed (green success, red failure) plus a plain `content` string so the mobile push preview shows the subject line.
 
-- Simplest: a free [ntfy.sh](https://ntfy.sh) topic — one `curl` call in the workflow's failure step, push notification to your phone.
-- Alternative: GitHub's own workflow-failure email notifications (on by default for the repo owner) — lower effort, less immediate.
-
-Already wired up in `.github/workflows/trigger-oven.yml` as a step with `if: failure()`; set the
-optional `NTFY_TOPIC` secret to enable the push notification.
+Already wired up in `.github/workflows/trigger-oven.yml` as two steps, `if: success()` and `if: failure()`; set the optional `DISCORD_WEBHOOK_URL` secret to enable it (see Discord channel Settings → Integrations → Webhooks → New Webhook). Skipped silently, with a log line, if that secret isn't set.
 
 ## Phase 5 — Testing plan
 

@@ -42,7 +42,7 @@ Trade-off being made explicitly: this is **not DST-safe** — the cron's fixed U
 | `SMARTHQ_USERNAME` | SmartHQ account email |
 | `SMARTHQ_REFRESH_TOKEN` | Long-lived refresh token from `scripts/get_refresh_token.py` |
 | `OVEN_MAC` | MAC address (appliance id) of the range, from the same script's discovery output |
-| `NTFY_TOPIC` (optional) | ntfy.sh topic for push notification on failure |
+| `DISCORD_WEBHOOK_URL` (optional) | Discord channel webhook URL for a push notification on every run, success or failure |
 
 All set under the repo's Settings → Secrets and variables → Actions. None should ever be committed to the repo; `.env.example` shows the shape without real values.
 

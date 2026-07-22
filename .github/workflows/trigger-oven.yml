@@ -62,15 +62,28 @@ jobs:
           TARGET_START_MINUTE: ${{ (github.event_name == 'workflow_dispatch' && inputs.target_start_minute != '' && inputs.target_start_minute) || env.TARGET_START_MINUTE }}
         run: python scripts/trigger_oven.py
 
-      - name: Notify on failure
+      # Every tick posts to Discord, success or failure, same as this repo's
+      # sibling Apps Script project's notify_() — so a quiet morning is a
+      # confirmed run, not just an absence of complaints. "No file found"
+      # equivalents don't apply here (trigger_oven.py itself no-clobbers
+      # instead of no-op'ing), so there are only two outcomes to report.
+      - name: Notify Discord on success
+        if: success()
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          TARGET_TEMP: ${{ (github.event_name == 'workflow_dispatch' && inputs.target_temp != '' && inputs.target_temp) || env.TARGET_TEMP }}
+          TARGET_START_HOUR: ${{ (github.event_name == 'workflow_dispatch' && inputs.target_start_hour != '' && inputs.target_start_hour) || env.TARGET_START_HOUR }}
+          TARGET_START_MINUTE: ${{ (github.event_name == 'workflow_dispatch' && inputs.target_start_minute != '' && inputs.target_start_minute) || env.TARGET_START_MINUTE }}
+        run: |
+          scripts/notify_discord.sh success \
+            "Oven preheat scheduled" \
+            "Delay-start was set successfully for ${TARGET_START_HOUR}:$(printf '%02d' "${TARGET_START_MINUTE}") Pacific at ${TARGET_TEMP}°F. Check the GitHub Actions log for details."
+
+      - name: Notify Discord on failure
         if: failure()
         env:
-          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
-          if [ -n "$NTFY_TOPIC" ]; then
-            curl -s -H "Title: Oven trigger failed" \
-                 -d "The scheduled oven preheat trigger failed. Check the GitHub Actions log." \
-                 "https://ntfy.sh/$NTFY_TOPIC" || true
-          else
-            echo "NTFY_TOPIC secret not set — skipping push notification. Relying on GitHub's default failure email."
-          fi
+          scripts/notify_discord.sh error \
+            "Oven trigger FAILED" \
+            "The scheduled oven preheat trigger failed after retries. Check the GitHub Actions log: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
