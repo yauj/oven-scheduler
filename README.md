@@ -32,8 +32,38 @@ requirements.txt              gehomesdk + aiohttp
 ## Local testing
 
 ```bash
+python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env   # fill in real values
-export $(grep -v '^#' .env | xargs)
+cp .env.example .env   # fill in real values (SMARTHQ_USERNAME, SMARTHQ_REFRESH_TOKEN, OVEN_MAC)
+set -a && source .env && set +a
 python scripts/trigger_oven.py
+```
+
+By default the script is a no-op unless the current Pacific time is within
+`WINDOW_MINUTES` of `TARGET_HOUR:TARGET_MINUTE` (see the module docstring in
+`scripts/trigger_oven.py`). To run it immediately regardless of time of day,
+set `FORCE=1`:
+
+```bash
+FORCE=1 python scripts/trigger_oven.py
+```
+
+`FORCE=1` only skips the time-of-day check — it still connects to the real
+oven and, if it's off, sends a real delay-start command targeting
+`TARGET_START_HOUR:TARGET_START_MINUTE`. To watch it actually start
+preheating without waiting until the next morning, also override the start
+time to a couple minutes from now, e.g.:
+
+```bash
+FORCE=1 TARGET_START_HOUR=14 TARGET_START_MINUTE=32 python scripts/trigger_oven.py
+```
+
+Before writing anything, the script reads back the oven's current cook-mode
+state and aborts (non-zero exit, no write) if it isn't off — so running this
+locally is safe to try even if someone already started a manual preheat or
+cook; you'll see something like:
+
+```
+ERROR: Oven is not off (current state: CONV_MUTLI_BAKE) — someone else may
+have set a preheat/cook already; refusing to override it.
 ```
